@@ -1,0 +1,30 @@
+{
+  "repository": "https://huggingface.co/datasets/matthewfranglen/lastfm-1k",
+  "revision": "8613d9f34c914629843ad4ac9fa02bee93815b1a",
+  "files": [
+    {
+      "file": "README.md",
+      "bytes": 3669,
+      "sha256": "c07202b1b9d04f602971845cc17d57bb28b677bc03508218aa06796e2534c548",
+      "url": "https://huggingface.co/datasets/matthewfranglen/lastfm-1k/resolve/8613d9f34c914629843ad4ac9fa02bee93815b1a/README.md"
+    },
+    {
+      "file": "train.gz.parquet",
+      "bytes": 364808533,
+      "sha256": "643e9cd7f298447649f9f08d98904f72222a49cff1b00df46c8c83b46b6fd26e",
+      "url": "https://huggingface.co/datasets/matthewfranglen/lastfm-1k/resolve/8613d9f34c914629843ad4ac9fa02bee93815b1a/train.gz.parquet"
+    },
+    {
+      "file": "valid.gz.parquet",
+      "bytes": 44279321,
+      "sha256": "830b73364992539bb08b7a363e02ad50f62cf4b1ffa8728d12ff67a7ec7a05c0",
+      "url": "https://huggingface.co/datasets/matthewfranglen/lastfm-1k/resolve/8613d9f34c914629843ad4ac9fa02bee93815b1a/valid.gz.parquet"
+    },
+    {
+      "file": "test.gz.parquet",
+      "bytes": 60114457,
+      "sha256": "74a3ac2261ebdf14b6756c9a4829b1cd13562b368d4c5e47945157bf97cdee53",
+      "url": "https://huggingface.co/datasets/matthewfranglen/lastfm-1k/resolve/8613d9f34c914629843ad4ac9fa02bee93815b1a/test.gz.parquet"
+    }
+  ]
+}

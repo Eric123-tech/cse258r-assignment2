@@ -1,0 +1,25 @@
+# Local environments and caches
+.venv/
+.cache/
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.DS_Store
+
+# Downloaded data: retain only source documentation and pinned manifest
+/data/raw/*
+!/data/raw/README.md
+!/data/raw/manifest.json
+/data/processed/
+*.parquet
+*.partial
+
+# Local assignment handout and individual-user / superseded artifacts
+/references/
+/reports/users_*.csv
+/reports/archive_initial/
+
+# Credentials and local configuration
+.env
+.env.*
+!.env.example

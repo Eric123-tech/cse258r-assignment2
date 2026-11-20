@@ -1,0 +1,23 @@
+{
+  "metric": "validation ndcg@10",
+  "best": "Recency h=28d",
+  "models": [
+    {
+      "name": "UserCF cosine k=20",
+      "kind": "cf",
+      "metric": "cosine",
+      "neighbors": 20
+    },
+    {
+      "name": "UserCF jaccard k=20",
+      "kind": "cf",
+      "metric": "jaccard",
+      "neighbors": 20
+    },
+    {
+      "name": "Recency h=28d",
+      "kind": "recent",
+      "half_life": 28
+    }
+  ]
+}
