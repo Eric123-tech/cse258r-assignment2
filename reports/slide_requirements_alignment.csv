@@ -1,0 +1,9 @@
+slide_file,pdf_pages,requirement,evidence
+assignment2_fa26.pdf,8,Dataset properties / exploratory findings,Notebook section 2; preprocessing_audit.csv; training_distributions.png
+assignment2_fa26.pdf,10,"Validity, preprocessing, EDA-feature connection",Notebook sections 1–2; feature rationale table; paired_bootstrap.csv
+assignment2_fa26.pdf,11,Compare feature representations,validation_feature_representations.csv; validation_feature_representations.png
+assignment2_fa26.pdf,11,"Model choices, scaling, noise, overfitting",Notebook section 3 equations / alternatives; validation_parameter_choices.png; timing columns
+assignment2_fa26.pdf,12,Related literature and comparison to findings,"Notebook section 5: Last.fm 1K/360K, implicit factors, SASRec"
+assignment2_fa26.pdf,13,Interpret parameters and successful/failed predictions,"Notebook section 4: repeat/novel recall, subgroup metrics, per-user change and examples"
+recommendation.pdf,"28–31,66",Direct course evidence for Jaccard/cosine UserCF,Notebook section 3 and src/pipeline.py: cf_scores
+temporal.pdf,12–13,Exponential weighting is already a course method,Notebook sections 3 and 5; recent_matrix

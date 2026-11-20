@@ -15,9 +15,9 @@ We use exactly **two course-related baselines**:
 
 Both select **20 neighbors** using validation NDCG@10. Neighbor preferences use normalized `log(1 + play count)`.
 
-These implement similarity-based collaborative filtering from the course's assigned *Personalized Machine Learning*, chapter 4. The [official workbook](https://cseweb.ucsd.edu/~jmcauley/pml/code/chap4.html) demonstrates Jaccard, cosine and similarity-based recommendation. Its example compares items; our implementation adapts the approach to user neighborhoods. See the [course syllabus](https://cseweb.ucsd.edu/classes/fa26/cse258-001/).
+The supplied `recommendation.pdf` explicitly covers user/item similarities (p.28: Jaccard; pp.29–31: cosine; p.66: user-based and weighting adaptations). These implement similarity-based collaborative filtering from the course's assigned *Personalized Machine Learning*, chapter 4. The [official workbook](https://cseweb.ucsd.edu/~jmcauley/pml/code/chap4.html) demonstrates Jaccard, cosine and similarity-based recommendation. Its example compares items; our implementation adapts the approach to user neighborhoods. See the [course syllabus](https://cseweb.ucsd.edu/classes/fa26/cse258-001/).
 
-Our comparison method is **time-decayed personal preference (Recency)**. Each historical play contributes `2 ** (-age_days / half_life)` to its artist's score. Validation selects a **28-day half-life**. This is a standard temporal heuristic applied to our task, not a new algorithm or a modification inside UserCF.
+Our comparison method is **time-decayed personal preference (Recency)**. Each historical play contributes `2 ** (-age_days / half_life)` to its artist's score. Validation selects a **28-day half-life**. The supplied `temporal.pdf`, pp.12–13, explicitly teaches exponential age weighting. Our day-based implementation applies that course idea to artist plays; it is not a new algorithm or a modification inside UserCF.
 
 | Method | Test NDCG@10 | Test Recall@10 | Test Precision@10 |
 |---|---:|---:|---:|
@@ -26,6 +26,17 @@ Our comparison method is **time-decayed personal preference (Recency)**. Each hi
 | Recency — project method | **0.5445** | **0.0950** | **0.5210** |
 
 Recency performs better in this experiment. This does not isolate the effect of time weighting, because Recency uses personal history while UserCF uses neighbor preferences. It also does not establish better new-artist discovery.
+
+## Additions following the detailed assignment slides (local revision)
+
+The notebook answers the questions in `assignment2_fa26.pdf` pages 8 and 10–13 directly, using numerical findings and interpretation after the supporting plots. It does not treat a plot inventory or requirement checklist as the answer. Training-only EDA findings are saved in `reports/eda_findings.csv`. Slides: [shared course folder](https://drive.google.com/drive/folders/1LcoSIMkErp1OHRQ5nUMTokfP_o51OY77).
+
+- **Feature representations:** validation-only Jaccard vote comparison (binary/raw-count/log-count) and a matched uniform-count versus exponential-age-weighting contrast. These diagnostics do not add headline baselines or change the frozen test models.
+- **Parameter interpretation:** validation curves for neighbor count and half-life; explicit score equations, model suitability, noise/overfitting discussion, and scoring/evaluation timing and score-matrix storage.
+- **Validity and errors:** repeat-target versus novel-target recall, user-level NDCG changes, and deterministic low/median/high examples with artist labels. Already-seen test results are descriptive, not a new blind test.
+- **Related work:** links dataset choice to Last.fm 1K versus 360K, implicit-feedback factorization and SASRec, with explicit limits on comparing published scores.
+
+New aggregate outputs include `reports/validation_feature_representations.csv`, `validation_feature_representations.png`, `validation_parameter_choices.png`, `per_user_ndcg_differences.png`, `preprocessing_audit.csv` and `slide_requirements_alignment.csv`. Individual-user examples stay local. The two course baselines and main test protocol are retained.
 
 ## Data: download separately
 
@@ -92,7 +103,7 @@ Parameters are selected on validation; models are refit on training plus validat
 
 ## Possible next steps
 
-- **Isolate the time effect:** compare unweighted and time-weighted versions of the same personal-history method, or add temporal weighting within Jaccard UserCF.
+- **Extend the controlled study:** the uniform-versus-decay personal-history comparison is now implemented on validation. A future model could add temporal weighting inside Jaccard UserCF, using separate validation.
 - **Try another course method:** add a BPR latent-factor model for implicit feedback.
 - **Check robustness:** use additional chronological windows and examine low-activity users, repeat listening and new-artist targets separately.
 

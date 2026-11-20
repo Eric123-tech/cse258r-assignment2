@@ -17,7 +17,7 @@ __pycache__/
 # Local assignment handout and individual-user / superseded artifacts
 /references/
 /reports/users_*.csv
-/reports/archive_initial/
+/reports/archive*/
 
 # Credentials and local configuration
 .env

@@ -1,0 +1,8 @@
+source_split,rows
+train,13365803
+valid,1521569
+test,2048762
+required-field nulls removed,0
+exact duplicate events removed,1
+outside documented period removed,138435
+retained after all preprocessing,16797698

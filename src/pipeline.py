@@ -1,12 +1,11 @@
 """Auditable temporal artist recommendation; no sampled evaluation negatives."""
 from pathlib import Path
-import json
+from time import perf_counter
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 from scipy import sparse
 from sklearn.preprocessing import normalize
-from sklearn.decomposition import TruncatedSVD
 
 ROOT = Path(__file__).resolve().parents[1]
 SEED = 258
@@ -26,15 +25,22 @@ def load_events():
     events = pd.concat(parts, ignore_index=True)
     del parts
     before = len(events)
-    events = events.dropna().drop_duplicates(['user_index','artist_index','track_index','timestamp'])
-    # Conservative exclusive May 5 cutoff from the original source description.
-    # Keep raw files intact; write excluded records for audit.
+    events = events.dropna()
+    missing = before - len(events)
+    nonnull = len(events)
+    events = events.drop_duplicates(['user_index','artist_index','track_index','timestamp'])
+    duplicates = nonnull - len(events)
+    # Conservative exclusive cutoff from the creator's collection description.
+    # Later records are excluded by provenance, not individually proven corrupt.
     in_period = events.timestamp < pd.Timestamp('2009-05-05')
     excluded = events.loc[~in_period]
     excluded.to_parquet(ROOT / 'data/processed/excluded_timestamps.parquet', index=False)
-    audit.append({'source_split':'outside documented period (>=2009-05-05)', 'rows':len(excluded)})
     events = events.loc[in_period].sort_values('timestamp').reset_index(drop=True)
-    audit.append({'source_split':'after null/exact-duplicate removal', 'rows':len(events), 'removed':before-len(events)-len(excluded)})
+    audit += [dict(source_split='required-field nulls removed', rows=missing),
+              dict(source_split='exact duplicate events removed', rows=duplicates),
+              dict(source_split='outside documented period removed', rows=len(excluded)),
+              dict(source_split='retained after all preprocessing', rows=len(events))]
+    assert before == missing + duplicates + len(excluded) + len(events)
     return events, pd.DataFrame(audit)
 
 def temporal_split(events, days=28):
@@ -51,6 +57,8 @@ def temporal_split(events, days=28):
 
 def make_context(history, cutoff, min_listeners=5, min_events=100):
     """Catalog and warm-user eligibility are determined exclusively from history."""
+    if history.empty or history.timestamp.max() >= pd.Timestamp(cutoff):
+        raise ValueError('History must be nonempty and strictly before the prediction cutoff.')
     counts = history.groupby(['user_index','artist_index']).size().rename('count').reset_index()
     listeners = counts.groupby('artist_index').size()
     artists = np.sort(listeners[listeners >= min_listeners].index.to_numpy())
@@ -68,6 +76,8 @@ def make_context(history, cutoff, min_listeners=5, min_events=100):
                 history_sizes=user_counts.to_dict(), counts=matrix, binary=binary, popularity=np.asarray(binary.sum(axis=0)).ravel())
 
 def recent_matrix(ctx, half_life):
+    if half_life <= 0:
+        raise ValueError('half_life must be positive.')
     h = ctx['history']
     age = (ctx['cutoff'] - h.timestamp).dt.total_seconds().to_numpy() / 86400
     assert np.min(age) >= 0
@@ -79,7 +89,20 @@ def recent_matrix(ctx, half_life):
     ok = ai >= 0
     return sparse.csr_matrix((grouped.w.to_numpy()[ok], (ui[ok], ai[ok])), shape=ctx['counts'].shape)
 
-def cf_scores(ctx, metric='cosine', neighbors=40):
+def preference_matrix(ctx, representation='log1p'):
+    """Neighbor voting features, holding binary user similarity fixed."""
+    x = ctx['counts'].copy()
+    if representation == 'binary':
+        x.data[:] = 1
+    elif representation == 'log1p':
+        x.data = np.log1p(x.data)
+    elif representation != 'count':
+        raise ValueError(f'Unknown preference representation: {representation}')
+    return normalize(x, norm='l1', axis=1)
+
+
+def cf_scores(ctx, metric='cosine', neighbors=40, representation='log1p'):
+    """Course neighborhood baseline; representations change voting, not neighbors."""
     b = ctx['binary']
     if metric == 'cosine':
         z = normalize(b, axis=1)
@@ -96,34 +119,23 @@ def cf_scores(ctx, metric='cosine', neighbors=40):
     order = np.argsort(-sim, axis=1, kind='stable')[:, :neighbors]
     keep = np.zeros_like(sim)
     np.put_along_axis(keep, order, np.take_along_axis(sim, order, axis=1), axis=1)
-    preferences = ctx['counts'].copy(); preferences.data = np.log1p(preferences.data)
-    preferences = normalize(preferences, norm='l1', axis=1)
+    preferences = preference_matrix(ctx, representation)
     return (sparse.csr_matrix(keep) @ preferences).toarray()
 
 def model_scores(ctx, spec):
-    kind = spec['kind']
-    if kind == 'popular':
-        return np.broadcast_to(ctx['popularity'], ctx['counts'].shape)
-    if kind == 'personal':
-        return ctx['counts'].toarray()
-    if kind == 'recent':
-        return recent_matrix(ctx,spec['half_life']).toarray()
-    if kind == 'cf':
-        return cf_scores(ctx, spec['metric'], spec['neighbors'])
-    if kind == 'svd':
-        x = ctx['counts'].copy(); x.data = np.log1p(x.data)
-        x = normalize(x, norm='l2', axis=1)
-        model = TruncatedSVD(n_components=min(spec['rank'], min(x.shape)-1), random_state=SEED)
-        factors = model.fit_transform(x)
-        return factors @ model.components_
-    if kind == 'hybrid':
-        cf = normalize(cf_scores(ctx,'cosine',40),norm='l1',axis=1)
-        recent = normalize(recent_matrix(ctx,spec['half_life']),norm='l1',axis=1).toarray()
-        return (1-spec['alpha'])*cf + spec['alpha']*recent
-    raise ValueError(kind)
+    """Only the two named baseline families and the temporal comparison method."""
+    if spec['kind'] == 'recent':
+        return recent_matrix(ctx, spec['half_life']).toarray()
+    if spec['kind'] == 'cf':
+        return cf_scores(ctx, spec['metric'], spec['neighbors'], spec.get('representation', 'log1p'))
+    raise ValueError(f"Unknown model kind: {spec['kind']}")
 
 def evaluate(scores, ctx, future, k=10):
     """Recall denominator includes out-of-catalog positives (honest end-to-end recall)."""
+    if scores.shape != ctx['counts'].shape or not np.isfinite(scores).all():
+        raise ValueError('Scores must be finite and match the historical user/catalog matrix.')
+    if not 1 <= k <= len(ctx['artists']):
+        raise ValueError('k must be between 1 and the catalog size.')
     truth = future.groupby('user_index').artist_index.agg(lambda x:set(x))
     catalog = set(ctx['artists'])
     pop = ctx['popularity']
@@ -141,17 +153,19 @@ def evaluate(scores, ctx, future, k=10):
         ideal = (1/np.log2(np.arange(2,min(k,len(target))+2))).sum()
         hist = ctx['history_sets'][u]
         novel = target - hist
+        repeat = target & hist
         rows.append(dict(user_index=int(u), recall=hits.sum()/len(target), precision=hits.mean(),
                          ndcg=float((hits/np.log2(np.arange(2,k+2))).sum()/ideal),
                          target_artists=len(target), covered_artists=len(target & catalog),
-                         repeat_share=len(target & hist)/len(target),
+                         repeat_share=len(repeat)/len(target),
+                         repeat_recall=len(set(rec)&repeat)/len(repeat) if repeat else np.nan,
                          novel_recall=len(set(rec)&novel)/len(novel) if novel else np.nan,
                          tail_recall=len(set(rec)&target&tail)/len(target&tail) if target&tail else np.nan,
                          history_events=int(ctx['history_sizes'][u]), recommendations=rec.tolist()))
     if not rows:
         raise ValueError('No eligible evaluation users; inspect history and windows.')
     per_user = pd.DataFrame(rows)
-    summary = per_user[['recall','precision','ndcg','novel_recall','tail_recall']].mean().to_dict()
+    summary = per_user[['recall','precision','ndcg','repeat_recall','novel_recall','tail_recall']].mean().to_dict()
     summary.update(users=len(rows), target_coverage=per_user.covered_artists.sum()/per_user.target_artists.sum(),
                    recommendation_coverage=len(set(a for r in per_user.recommendations for a in r))/len(catalog))
     return summary, per_user
@@ -167,13 +181,49 @@ def compare(ctx,future,specs):
     results,details = [],{}
     for spec in specs:
         print('Evaluating:',spec['name'],flush=True)
-        summary,users = evaluate(model_scores(ctx,spec),ctx,future)
+        start = perf_counter()
+        scores = model_scores(ctx,spec)
+        scored = perf_counter()
+        summary,users = evaluate(scores,ctx,future)
+        summary.update(score_seconds=scored-start, evaluation_seconds=perf_counter()-scored,
+                       score_matrix_mib=scores.nbytes/(1024**2))
         results.append(dict(model=spec['name'],**summary)); details[spec['name']] = users
     return pd.DataFrame(results).set_index('model'),details
 
 def paired_bootstrap(a,b,metric='ndcg', repetitions=2000):
+    if set(a.user_index) != set(b.user_index) or len(a) == 0:
+        raise ValueError('Paired comparisons require the same nonempty set of users.')
     merged = a[['user_index',metric]].merge(b[['user_index',metric]],on='user_index',validate='one_to_one')
     d = (merged[f'{metric}_x']-merged[f'{metric}_y']).to_numpy()
     rng = np.random.default_rng(SEED)
     boot = rng.choice(d,size=(repetitions,len(d)),replace=True).mean(axis=1)
     return dict(mean_difference=float(d.mean()), ci_low=float(np.quantile(boot,.025)),ci_high=float(np.quantile(boot,.975)),users=len(d))
+
+
+def load_artist_names():
+    """Labels for EDA/examples only; names do not enter model features."""
+    names = {}
+    for split in ['train', 'valid', 'test']:
+        source = pq.ParquetFile(ROOT / f'data/raw/{split}.gz.parquet')
+        for batch in source.iter_batches(columns=['artist_index','artist_name'], batch_size=500000):
+            unique = batch.to_pandas().drop_duplicates('artist_index')
+            for ident, label in zip(unique.artist_index, unique.artist_name):
+                names.setdefault(int(ident), str(label))
+    return names
+
+
+def feature_representation_study(ctx, future, validation):
+    """Validation-only controlled diagnostics; not new headline baselines."""
+    rows = []
+    for representation in ['binary', 'count', 'log1p']:
+        summary, _ = evaluate(cf_scores(ctx, 'jaccard', 20, representation), ctx, future)
+        rows.append(dict(experiment='Jaccard neighbor-vote representation',
+                         representation=representation, **summary))
+    # Matched personal-history contrast isolates age weighting, unlike CF vs Recency.
+    summary, _ = evaluate(ctx['counts'].toarray(), ctx, future)
+    rows.append(dict(experiment='Personal-history age weighting', representation='uniform play counts', **summary))
+    for half_life in [7, 28, 90]:
+        existing = validation.loc[f'Recency h={half_life}d'].to_dict()
+        rows.append(dict(experiment='Personal-history age weighting',
+                         representation=f'exponential half-life={half_life} days', **existing))
+    return pd.DataFrame(rows)

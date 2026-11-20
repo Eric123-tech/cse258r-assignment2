@@ -33,4 +33,24 @@ assert a.timestamp.max()<b.timestamp.min() and b.timestamp.max()<t.timestamp.min
 for model in p.candidates():
     scores=p.model_scores(c,model)
     assert scores.shape==c['counts'].shape and np.isfinite(scores).all(),model
-print('PASS: hand-computed ranking, OOV denominator, zero self-neighbor scores, temporal weights, catalog isolation, paired bootstrap, all model shapes.')
+# Representation transformations must change vote strength, not binary neighbors.
+h2 = pd.concat([h,h[(h.user_index==0) & (h.artist_index==0)]],ignore_index=True)
+c2=p.make_context(h2,'2009-02-01',min_listeners=1,min_events=1)
+row=p.preference_matrix(c2,'count').toarray()[0]
+binary=p.preference_matrix(c2,'binary').toarray()[0]
+log=p.preference_matrix(c2,'log1p').toarray()[0]
+assert row[0]>log[0]>binary[0]
+for rep in ['binary','count','log1p']:
+    x=p.preference_matrix(c2,rep)
+    assert np.allclose(np.asarray(x.sum(axis=1)).ravel(),1)
+    assert np.isfinite(p.cf_scores(c2,'jaccard',2,rep)).all()
+assert users.iloc[0].repeat_recall==1
+# Reject leaked boundary events, invalid weights and unmatched paired populations.
+for operation in [lambda:p.make_context(h,'2009-01-01',min_listeners=1,min_events=1),
+                  lambda:p.recent_matrix(c,0),
+                  lambda:p.evaluate(np.zeros((1,1)),c,future),
+                  lambda:p.paired_bootstrap(users,users.iloc[0:0])]:
+    try:operation()
+    except ValueError:pass
+    else:raise AssertionError('Expected invalid protocol input to be rejected')
+print('PASS: ranking/OOV/repeat metrics, temporal boundaries, weights, feature representations, paired populations and model shapes.')
