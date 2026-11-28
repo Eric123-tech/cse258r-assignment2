@@ -143,10 +143,14 @@ code('''eda_answer,eda_statistics=analysis.exploratory_answers(
 display(Markdown(eda_answer))
 eda_statistics.to_csv(REPORTS/'eda_findings.csv',index=False)
 ''')
-md('''## 3. Two course-related baselines and the project method
+md('''## 3. Baselines, the project method and a learned ranker
 **PDF question (p.11): Which course models are relevant, and what are the baselines?**
 
-**Answer.** Our main baseline is Jaccard UserCF and the second is cosine UserCF. Both directly use the observed user–artist interaction structure. They test whether similar listeners help predict future listening. We compare these with time-decayed personal preference to ask whether the user's recent history is more informative. Exactly two methods have the headline baseline role; the later uniform-count experiment is a matched feature contrast, not a third headline model.
+**Answer.** Our main baseline is Jaccard UserCF and the second is cosine UserCF. Both directly use the observed user–artist interaction structure. They test whether similar listeners help predict future listening. We compare these with time-decayed personal preference to ask whether the user's recent history is more informative. Below them sit two trivial baselines that any useful model must beat, and above them a logistic-regression ranker that learns how to combine the signals.
+
+**Trivial baseline 1: Popularity.** Recommend the ten artists with the most historical listeners to everyone. No personalization.
+
+**Trivial baseline 2: Personal counts.** Recommend each user's ten most-played artists, ignoring when the plays happened. Neither trivial baseline has a parameter to tune.
 
 **Baseline 1: Jaccard UserCF.** Let A(u) be the historical candidate artists heard by user u. User similarity is `|A(u) ∩ A(v)| / |A(u) ∪ A(v)|`. Select the k most similar other users, then sum their artist preferences weighted by similarity. Neighbor preferences are log(1 + play count), normalized per user. Tune k in {20,40} on validation.
 
@@ -156,7 +160,11 @@ Direct slide evidence: [recommendation.pdf](https://drive.google.com/file/d/1VAt
 
 **Project method: time-decayed personal preference (Recency).** Score each artist by summing `2 ** (-age_days / half_life)` over that user's historical plays. Tune half-life in {7,28,90} days on validation. This method emphasizes recent personal interests rather than neighbor preferences. The provided [temporal.pdf](https://drive.google.com/file/d/1YQdxP_boLqM24MEiXy65ii3Utiqp55R3/view), PDF pp.12–13, explicitly teaches exponential age weighting; we adapt it to calendar-day play ages. It is a course-inspired temporal heuristic applied to this task; it is not claimed as a new algorithm or an internal modification of Jaccard UserCF. Any improvement claim is empirical and specific to the evaluated dataset/window.
 
-All three methods retain historical artists as candidates. Ties use historical listener popularity, then artist ID. CF excludes self-neighbors; all features precede the prediction cutoff. More neighbors smooth preferences; a shorter half-life gives more weight to recent behavior. Pairwise user similarities require O(U²) memory and full scores O(UI). Previously tested extra models and tables are preserved under `reports/archive_initial/` for audit, outside this focused comparison.''')
+**Learned ranker: logistic regression over (user, artist) features.** Recency commits to one half-life and one way of counting. Instead we let a classifier (course chapter 3) learn the combination. Each candidate pair (u, a) — every artist u has heard plus the 20 top Jaccard-CF artists u has not heard — gets 21 features: play count, days since first/last play, decayed scores at half-lives 3/7/28/90/365 days, plays and distinct listening days in the last 28 days, distinct listening days overall, the artist's share of u's plays, u's overall and recent activity, the Jaccard CF score, artist popularity overall and in the last 28 days, and a heard-before flag. Count-like features are log(1+x) transformed and all are standardized. The label is whether u plays a in the next 28 days.
+
+To train without touching the evaluation window, the ranker uses the *previous* 28 days inside the history: features from history before cutoff − 28 days, labels from [cutoff − 28 days, cutoff). For validation that is Feb 10 – Mar 9, 2009; for test it is the validation window. The regularization strength C ∈ {0.01, 0.1, 1} is chosen on validation NDCG@10. The trivial baselines and the ranker were added after the original comparison below had already been run on test; they were designed and tuned on validation only and evaluated on test once.
+
+All methods except Popularity retain historical artists as candidates. Ties use historical listener popularity, then artist ID. CF excludes self-neighbors; all features precede the prediction cutoff. More neighbors smooth preferences; a shorter half-life gives more weight to recent behavior. Pairwise user similarities require O(U²) memory and full scores O(UI). Previously tested extra models and tables are preserved under `reports/archive_initial/` for audit, outside this focused comparison.''')
 md(r'''### Inputs, outputs, optimization and alternatives
 Let $c_{ua}$ count historical plays, $b_{ua}=1[c_{ua}>0]$, and $A(u)$ be user u's historical candidate-artist set. Let $N_k(u)$ contain the k highest-similarity other users. Neighbor features are $q_{va}=\log(1+c_{va})/\sum_j\log(1+c_{vj})$.
 
@@ -166,13 +174,19 @@ sim_C(u,v)=\frac{b_u^T b_v}{\|b_u\|_2\|b_v\|_2}.$$
 
 $$s_{time}(u,a)=\sum_{e:\,u_e=u,\,a_e=a}2^{-(t_{cutoff}-t_e)/(h\text{ days})}.$$
 
-These are scoring heuristics, with no learned regression coefficients and no gradient-descent loss. Hyperparameters k and h are selected by validation macro NDCG@10 grid search. h is a half-life: a play h days old contributes one-half the weight of a just-observed play. k controls the amount of neighborhood smoothing. Both differ from the fixed 28-day prediction horizon. Binary relevance discards how many future times an artist is played.
+For the learned ranker, with standardized feature vector $x_{ua}$ and label $y_{ua}=1$[u plays a in the next 28 days],
 
-Neighborhood models fit observed user–artist behavior without audio/text features or explicit ratings. An explicit-rating MSE regressor would require a different target; raw plays are not star ratings. Logistic regression/SVM could be adapted to future interaction prediction but require a labeled user–artist sample design (and careful treatment of unobserved pairs); they are not direct substitutes without reformulating the task. Text models lack meaningful document features here. Implicit-feedback latent factors and sequence models are relevant alternatives discussed in related work, but are not implemented or claimed as evaluated. A large neural model is not necessary to answer the current question.
+$$s_{LR}(u,a)=\theta^T x_{ua},\qquad \min_\theta\ -\sum_{(u,a)}\big[y_{ua}\log\sigma(\theta^T x_{ua})+(1-y_{ua})\log(1-\sigma(\theta^T x_{ua}))\big]+\frac{1}{2C}\|\theta\|_2^2 .$$
+
+Artists outside u's candidate set rank below every candidate.
+
+Popularity, personal counts, CF and Recency are scoring heuristics, with no learned regression coefficients and no gradient-descent loss; the ranker is the only model fitted by optimization. Hyperparameters k and h are selected by validation macro NDCG@10 grid search. h is a half-life: a play h days old contributes one-half the weight of a just-observed play. k controls the amount of neighborhood smoothing. Both differ from the fixed 28-day prediction horizon. Binary relevance discards how many future times an artist is played.
+
+Neighborhood models fit observed user–artist behavior without audio/text features or explicit ratings. An explicit-rating MSE regressor would require a different target; raw plays are not star ratings. Logistic regression needs a labeled user–artist sample design; our ranker supplies one by restricting to candidate pairs and labeling them from an earlier window, which keeps the problem small (about 500k pairs) and avoids treating all ~20M unobserved pairs as negatives. An SVM would fit the same design but gives no probabilities and was not needed. Text models lack meaningful document features here. Implicit-feedback latent factors and sequence models are relevant alternatives discussed in related work, but are not implemented or claimed as evaluated. A large neural model is not necessary to answer the current question.
 
 Noise includes possible erroneous timestamps, ambiguous duplicate logging, unverified demographics and selection from identifier filtering. Sparse long-tail artists may be excluded by minimum support. Grid search can still overfit validation; small grids and separate test refits reduce but do not eliminate this risk. The already-inspected test cannot be used to choose new representations.''')
 code('''# Include source in the HTML so graders can inspect code without opening modules.
-for fn in [p.make_context,p.recent_matrix,p.preference_matrix,p.cf_scores,p.model_scores,p.evaluate]:
+for fn in [p.make_context,p.recent_matrix,p.preference_matrix,p.cf_scores,p.pair_features,p.fit_ranker,p.ranker_scores,p.model_scores,p.evaluate]:
     display(Markdown('```python'+chr(10)+inspect.getsource(fn)+chr(10)+'```'))
 ''')
 code('''specs=p.candidates()
@@ -189,6 +203,26 @@ selected_best=max(selected,key=lambda s:validation.loc[s['name'],'ndcg'])['name'
 (REPORTS/'selected_models.json').write_text(json.dumps(dict(metric='validation ndcg@10',best=selected_best,models=selected),indent=2))
 print('Frozen validation-selected model:',selected_best)
 ''')
+md('''### Which features does the ranker rely on?
+Refit the selected ranker on the validation context (trained on Feb 10 – Mar 9 labels) and inspect its coefficients. Features are standardized, so magnitudes are comparable, but many are correlated (e.g. count and distinct listening days), so a coefficient is the effect *holding the others fixed*, not the feature's standalone usefulness.''')
+code('''ranker_spec=next(s for s in selected if s['kind']=='logistic')
+_,ranker,ranker_info=p.fit_ranker(ctx,ranker_spec['C'])
+print('Training pairs:',ranker_info['pairs'],' positive rate:',round(ranker_info['positive_rate'],4))
+coefficients=pd.Series(ranker.coef_[0],index=p.RANKER_FEATURES).sort_values()
+coefficients.rename('coefficient').to_csv(REPORTS/'ranker_coefficients.csv')
+fig,ax=plt.subplots(figsize=(8,6),layout='constrained')
+ax.barh(coefficients.index,coefficients,color=np.where(coefficients>0,'#2674a6','#c0504d'))
+ax.axvline(0,color='black',lw=.8);ax.grid(False);ax.grid(axis='x',alpha=.25)
+ax.set(title='Logistic-regression ranker coefficients (standardized features)',xlabel='Coefficient (positive = more likely to be played next 28 days)')
+fig.savefig(REPORTS/'ranker_coefficients.png',dpi=180);plt.show()
+coef=coefficients
+display(Markdown(f"**Reading.** The strongest positive feature is the number of distinct days the user has listened to the artist "
+    f"(`days_all`, {coef['days_all']:+.2f}), while raw play count is *negative* ({coef['count']:+.2f}) once days are held fixed: "
+    "an artist played a little on many days is more likely to return than one binged on a single day. "
+    f"Long-memory decay (`d365` {coef['d365']:+.2f}, `d90` {coef['d90']:+.2f}) and recency of the last play (`last` {coef['last']:+.2f}) matter more than "
+    f"the 3–28 day decayed scores, which are largely redundant with them. The Jaccard CF score gets a small weight ({coef['cf']:+.2f}), "
+    "consistent with neighbors adding little beyond the user's own history for this repeat-heavy task."))
+''')
 md('''### Validation-only feature and parameter analysis (slide p.11)
 Keep the two headline baselines and their original selection grids. First vary neighbor vote representation while holding Jaccard similarity and k=20 fixed. Then compare uniform personal play counts with exponentially age-weighted counts, holding whose history is used fixed. The uniform-count row is a controlled ablation reference, not a third headline baseline. No new representation is selected for test from these results.
 
@@ -200,6 +234,36 @@ analysis.plot_feature_study(feature_study,REPORTS);plt.show()
 analysis.plot_parameter_choices(validation,specs,REPORTS);plt.show()
 display(Markdown(analysis.feature_interpretation(feature_study)))
 display(validation[['score_seconds','evaluation_seconds','score_matrix_mib']])
+''')
+md('''### Does listening time help? A validation-only duration feature
+The dataset has no play-duration column: each row only says a track was scrobbled at a time. Scrobble timestamps mark when a track started, so the gap to the same user's next play is roughly how long the track ran plus any pause. We test whether this proxy adds information beyond play counts inside Recency, holding everything else fixed:
+
+- **count** (current): every play has weight 1.
+- **gap**: weight = gap to the next play, capped at 10 minutes and scaled to [0, 1]. Long pauses between sessions hit the cap.
+- **relative**: gap divided by that track's median plausible gap (30 s–20 min), capped at 1, i.e. "did this play run as long as the track usually does?" This removes the bias toward artists with long songs.
+- **no_skip**: plays followed by another play within 30 s get weight 0.
+
+Gaps are computed within history only. A user's last play before the cutoff has no observable next play, so it keeps weight 1; nothing after the cutoff is used. Last.fm only records a scrobble after half the track or four minutes, so true skips are mostly missing from the log. We therefore expected small effects. This is an added exploratory analysis: it is selected and reported on validation only, and does not change the frozen test models.''')
+code('''duration,duration_details=p.duration_study(ctx,valid)
+duration.to_csv(REPORTS/'validation_duration_features.csv')
+display(duration.pivot(index='play_weight',columns='half_life',values='ndcg').loc[['count','gap','relative','no_skip']].round(4))
+duration_ci=pd.DataFrame([dict(half_life=h,play_weight=w,**p.paired_bootstrap(duration_details[f'Recency h={h}d {w}'],duration_details[f'Recency h={h}d count']))
+                          for h in [7,28,90] for w in ['gap','relative','no_skip']])
+display(duration_ci.round(4))
+fig,ax=plt.subplots(figsize=(9,4.5),layout='constrained')
+weights=['count','gap','relative','no_skip']
+for h in [7,28,90]:
+    ax.plot(weights,[duration.loc[f'Recency h={h}d {w}','ndcg'] for w in weights],marker='o',label=f'h={h} days')
+ax.set(ylabel='Validation macro NDCG@10 (axis does not start at 0)',xlabel='Per-play weight inside Recency',title='Play counts vs listening-time proxies (validation only)')
+ax.legend();ax.grid(False);ax.grid(axis='y',alpha=.25)
+fig.savefig(REPORTS/'validation_duration_features.png',dpi=180);plt.show()
+best=duration_ci.loc[duration_ci.mean_difference.idxmax()]
+display(Markdown(f"**Result.** No duration proxy reliably beats plain play counts. The largest gain is **{best.play_weight}** at h={best.half_life}: "
+    f"{best.mean_difference:+.4f} NDCG@10, 95% interval [{best.ci_low:.4f}, {best.ci_high:.4f}], which includes zero. "
+    f"The *relative* version, which removes song-length bias, is never better than counts. Only "
+    f"{(p.play_weights(ctx['history'],'no_skip')==0).mean():.2%} of history plays look like skips, which matches Last.fm's scrobble rule. "
+    "Our reading: for artist-level prediction, play counts already capture how much someone listens; the gap mostly adds song length and pause noise. "
+    "We keep the simpler count representation."))
 ''')
 md('''## 4. Held-out evaluation and validity
 Refit each validation-selected family setting using training plus validation; evaluate the final 28 days. Do not filter past artists, because repeats belong to the task. Tail artists are the bottom 80% of catalog artists ordered by training listener popularity; novel targets are artists outside each user's full observed history (including any historical artist excluded from the catalog). Repeat recall evaluates previously heard targets separately. Out-of-catalog positives remain in recall denominators; coverage exposes them.
@@ -230,6 +294,15 @@ for name,f in test_details.items():
 groups=pd.concat(groups,ignore_index=True)
 display(groups); groups.to_csv(REPORTS/'activity_groups.csv',index=False)
 ''')
+md('''### Summary: every model on the same test users
+One table for all six models, sorted by NDCG@10. The NDCG interval is each model's own user-bootstrap 95% interval; the last three columns are the *paired* difference from Recency, our project method and the strongest heuristic.
+
+Read the two kinds of interval differently. Per-model intervals are wide because users differ a lot in how predictable they are, and that spread is shared by every model, so two models' intervals can overlap even when one is reliably better. The paired interval compares models on the same users, cancelling that shared spread; a paired interval that excludes zero is the evidence for a real difference.''')
+code('''recency_name=next(s['name'] for s in selected if s['kind']=='recent')
+summary=p.summary_table(test_metrics,test_details,recency_name)
+summary.to_csv(REPORTS/'test_summary_table.csv')
+display(summary.round(4))
+''')
 md('''### Error analysis: repeat targets, discovery and user differences
 Separate repeat-target recall from novel-target recall to avoid calling successful repetition 'discovery'. The following three Recency cases are selected deterministically from low, median and high NDCG users to illustrate outcomes; they are not random or representative examples. Artist names only label already-computed predictions. These descriptions are exploratory, not causal explanations.''')
 code('''recency_name=next(s['name'] for s in selected if s['kind']=='recent')
@@ -245,8 +318,24 @@ case_recommendations.to_csv(REPORTS/'users_case_recommendations.csv',index=False
 code('''r=test_metrics.loc[selected_best]
 ci=p.paired_bootstrap(test_details[selected_best],test_details[jaccard_name])
 text=f"Validation selected **{selected_best}**. Held-out NDCG@10 = **{r['ndcg']:.4f}**, Recall@10 = **{r['recall']:.4f}**, evaluated users = **{int(r['users'])}**. Target coverage = **{r['target_coverage']:.2%}**."
-text+=chr(10)*2+f"Paired NDCG difference from the Jaccard UserCF baseline = **{ci['mean_difference']:.4f}**, user-bootstrap 95% interval **[{ci['ci_low']:.4f}, {ci['ci_high']:.4f}]**. An interval crossing zero does not establish directional improvement. These test numbers reproduce the original frozen comparison. The validation-only matched feature contrast is the relevant evidence about age weighting itself; the test contrast additionally changes personal versus neighbor signal. Negative results should be explained without modifying the held-out protocol."
+text+=chr(10)*2+f"Paired NDCG difference from the Jaccard UserCF baseline = **{ci['mean_difference']:.4f}**, user-bootstrap 95% interval **[{ci['ci_low']:.4f}, {ci['ci_high']:.4f}]**. An interval crossing zero does not establish directional improvement. The CF and Recency rows reproduce the original frozen comparison exactly. The validation-only matched feature contrast is the relevant evidence about age weighting itself; the test contrast additionally changes personal versus neighbor signal. Negative results should be explained without modifying the held-out protocol."
 display(Markdown(text))
+''')
+md('''### Does the learned ranker beat Recency, and what does it cost?
+The headline intervals above are against Jaccard UserCF. The more demanding comparison is the ranker against the strongest heuristic, Recency, on the same users. We check it on validation (where C was chosen) and on test (evaluated once).''')
+code('''ranker_name=ranker_spec['name']
+lr_vs_recency=pd.DataFrame([dict(split='validation',**p.paired_bootstrap(val_details[ranker_name],val_details[recency_name])),
+                            dict(split='test',**p.paired_bootstrap(test_details[ranker_name],test_details[recency_name]))])
+display(lr_vs_recency.round(4)); lr_vs_recency.to_csv(REPORTS/'ranker_vs_recency_bootstrap.csv',index=False)
+cols=['ndcg','precision','recall','repeat_recall','novel_recall','tail_recall','recommendation_coverage']
+display(test_metrics.loc[[ranker_name,recency_name],cols].round(4))
+t=lr_vs_recency.set_index('split').loc['test'];a=test_metrics.loc[ranker_name];b=test_metrics.loc[recency_name]
+display(Markdown(f"**Result.** The ranker improves NDCG@10 over Recency by **{t.mean_difference:+.4f}** on test "
+    f"(95% interval [{t.ci_low:.4f}, {t.ci_high:.4f}]), matching the validation gain, and also improves precision and repeat recall. "
+    f"The cost is the long tail: tail recall drops from {b.tail_recall:.4f} to {a.tail_recall:.4f}, likely because it rewards long-term, many-day listening "
+    f"and recent artist popularity (`pop28`), which favor established artists over niche ones. Novel recall stays near zero ({a.novel_recall:.4f}), so the gain comes from ordering familiar artists better, not from discovery. "
+    "Which model to prefer depends on the goal: the ranker for accurate short-term queues, Recency if exposure to niche artists matters. "
+    "Because the test window had been seen before these models were added, this is a single post-hoc test check of a validation-chosen model rather than a pristine blind test."))
 ''')
 code('''display(Markdown(analysis.results_answers(test_metrics,intervals,validation,groups)))''')
 md('''### Limitations and next experiments

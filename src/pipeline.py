@@ -5,7 +5,8 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 from scipy import sparse
-from sklearn.preprocessing import normalize
+from sklearn.preprocessing import normalize, StandardScaler
+from sklearn.linear_model import LogisticRegression
 
 ROOT = Path(__file__).resolve().parents[1]
 SEED = 258
@@ -72,16 +73,36 @@ def make_context(history, cutoff, min_listeners=5, min_events=100):
     assert len(artists) >= 10
     binary = matrix.copy(); binary.data[:] = 1
     return dict(history=history, cutoff=pd.Timestamp(cutoff), users=users, artists=artists,
+                thresholds=dict(min_listeners=min_listeners, min_events=min_events),
                 eligible=eligible, history_sets=history.groupby('user_index').artist_index.agg(set).to_dict(),
                 history_sizes=user_counts.to_dict(), counts=matrix, binary=binary, popularity=np.asarray(binary.sum(axis=0)).ravel())
 
-def recent_matrix(ctx, half_life):
+def play_weights(h, kind='count', cap=600, skip=30):
+    """Listening-time proxies from the gap to the same user's next historical play.
+    Scrobble timestamps mark track starts, so a gap ~ play time plus any pause. The last
+    play before the cutoff has no observed gap (the next play is unseen) and keeps weight 1."""
+    if kind == 'count':
+        return np.ones(len(h))
+    # History is globally time-sorted, so within-user shift is chronological.
+    gap = (h.groupby('user_index').timestamp.shift(-1) - h.timestamp).dt.total_seconds()
+    if kind == 'gap':
+        return gap.clip(upper=cap).div(cap).fillna(1).to_numpy()
+    if kind == 'no_skip':
+        return (gap.isna() | (gap >= skip)).astype(float).to_numpy()
+    if kind == 'relative':
+        # Typical track length: median plausible gap per track, else the global median.
+        plausible = gap.where(gap.between(skip, 1200))
+        typical = plausible.groupby(h.track_index).transform('median').fillna(plausible.median())
+        return (gap / typical).clip(upper=1).fillna(1).to_numpy()
+    raise ValueError(f'Unknown play weight: {kind}')
+
+def recent_matrix(ctx, half_life, play_weight='count'):
     if half_life <= 0:
         raise ValueError('half_life must be positive.')
     h = ctx['history']
     age = (ctx['cutoff'] - h.timestamp).dt.total_seconds().to_numpy() / 86400
     assert np.min(age) >= 0
-    w = np.exp2(-age / half_life)
+    w = np.exp2(-age / half_life) * play_weights(h, play_weight)
     # Aggregate before creating sparse matrix to bound memory.
     grouped = pd.DataFrame({'u':h.user_index.to_numpy(), 'a':h.artist_index.to_numpy(), 'w':w}).groupby(['u','a']).w.sum().reset_index()
     ui = pd.Index(ctx['users']).get_indexer(grouped.u)
@@ -122,12 +143,89 @@ def cf_scores(ctx, metric='cosine', neighbors=40, representation='log1p'):
     preferences = preference_matrix(ctx, representation)
     return (sparse.csr_matrix(keep) @ preferences).toarray()
 
+NEVER = 3650  # days-since-play placeholder for CF-only candidates the user never played
+
+def pair_features(ctx, extra=20):
+    """One row per (user, candidate artist): every historical artist plus top-`extra` unheard CF artists."""
+    h = ctx['history']
+    h = h[h.artist_index.isin(ctx['artists'])]
+    age = (ctx['cutoff'] - h.timestamp).dt.total_seconds().to_numpy() / 86400
+    x = pd.DataFrame({'u':h.user_index.to_numpy(), 'a':h.artist_index.to_numpy(), 'age':age, 'day':np.floor(age)})
+    for hl in [3, 7, 28, 90, 365]:
+        x[f'd{hl}'] = np.exp2(-age / hl)
+    x['p28'] = age < 28
+    x['day28'] = np.where(age < 28, x.day, np.nan)
+    f = x.groupby(['u','a']).agg(count=('age','size'), last=('age','min'), first=('age','max'),
+                                 d3=('d3','sum'), d7=('d7','sum'), d28=('d28','sum'), d90=('d90','sum'), d365=('d365','sum'),
+                                 p28=('p28','sum'), days28=('day28','nunique'), days_all=('day','nunique')).reset_index()
+    cf = cf_scores(ctx, 'jaccard', 20)
+    users, artists = pd.Index(ctx['users']), pd.Index(ctx['artists'])
+    seen = set(zip(f.u, f.a))
+    order = np.argsort(-cf, axis=1, kind='stable')
+    rows = []
+    for r, u in enumerate(ctx['users']):
+        new = [a for a in artists[order[r, :len(ctx['history_sets'].get(u, ())) + extra]] if (u, a) not in seen][:extra]
+        rows += [(u, a) for a in new]
+    f = pd.concat([f, pd.DataFrame(rows, columns=['u','a'])], ignore_index=True)
+    f[['last','first']] = f[['last','first']].fillna(NEVER)
+    f = f.fillna(0)
+    user = x.groupby('u').agg(u_total=('age','size'), u_p28=('p28','sum'), u_last=('age','min'))
+    f = f.join(user, on='u').join(f[f['count'] > 0].groupby('u').size().rename('u_artists'), on='u').fillna({'u_last':NEVER}).fillna(0)
+    f['share28'] = f.p28 / f.u_p28.clip(lower=1)
+    f['share_all'] = f['count'] / f.u_total.clip(lower=1)
+    f['cf'] = cf[users.get_indexer(f.u), artists.get_indexer(f.a)]
+    f['pop'] = ctx['popularity'][artists.get_indexer(f.a)]
+    f['pop28'] = f.a.map(x[x.age < 28].groupby('a').u.nunique()).fillna(0)
+    f['heard'] = (f['count'] > 0).astype(float)
+    return f
+
+RANKER_FEATURES = ['count','last','first','d3','d7','d28','d90','d365','p28','days28','days_all',
+                   'u_total','u_p28','u_last','u_artists','share28','share_all','cf','pop','pop28','heard']
+
+def feature_matrix(f):
+    z = f[RANKER_FEATURES].astype(float)
+    logged = [c for c in RANKER_FEATURES if c not in ('share28','share_all','heard')]
+    z[logged] = np.log1p(z[logged].clip(lower=0))
+    return z.to_numpy()
+
+def fit_ranker(ctx, C=1.0, window=28):
+    """Learn from the window just before ctx's cutoff: features from history before cutoff-window,
+    labels = artists heard in [cutoff-window, cutoff). Uses only ctx['history'], so no future leakage."""
+    split = ctx['cutoff'] - pd.Timedelta(days=window)
+    h = ctx['history']
+    inner = make_context(h[h.timestamp < split], split, **ctx['thresholds'])
+    future = h[h.timestamp >= split]
+    f = pair_features(inner)
+    f = f[f.u.isin(inner['eligible'] & set(future.user_index))]
+    y = f.merge(future[['user_index','artist_index']].drop_duplicates(), how='left', left_on=['u','a'],
+                right_on=['user_index','artist_index'], indicator=True)['_merge'].eq('both').to_numpy()
+    if y.all() or not y.any():
+        raise ValueError('Ranker training window needs both positive and negative pairs.')
+    scaler = StandardScaler().fit(feature_matrix(f))
+    model = LogisticRegression(C=C, max_iter=2000).fit(scaler.transform(feature_matrix(f)), y)
+    return scaler, model, dict(pairs=len(f), positive_rate=float(y.mean()))
+
+def ranker_scores(ctx, C=1.0):
+    scaler, model, _ = fit_ranker(ctx, C)
+    f = pair_features(ctx)
+    s = model.decision_function(scaler.transform(feature_matrix(f)))
+    # Non-candidates rank below every candidate; evaluate() then breaks ties by popularity.
+    out = np.full(ctx['counts'].shape, s.min() - 1.0)
+    out[pd.Index(ctx['users']).get_indexer(f.u), pd.Index(ctx['artists']).get_indexer(f.a)] = s
+    return out
+
 def model_scores(ctx, spec):
-    """Only the two named baseline families and the temporal comparison method."""
+    """Trivial baselines, the two course baselines, the temporal method and the learned ranker."""
+    if spec['kind'] == 'popular':
+        return np.tile(ctx['popularity'].astype(float), (len(ctx['users']), 1))
+    if spec['kind'] == 'personal':
+        return ctx['counts'].toarray()
     if spec['kind'] == 'recent':
-        return recent_matrix(ctx, spec['half_life']).toarray()
+        return recent_matrix(ctx, spec['half_life'], spec.get('play_weight', 'count')).toarray()
     if spec['kind'] == 'cf':
         return cf_scores(ctx, spec['metric'], spec['neighbors'], spec.get('representation', 'log1p'))
+    if spec['kind'] == 'logistic':
+        return ranker_scores(ctx, spec['C'])
     raise ValueError(f"Unknown model kind: {spec['kind']}")
 
 def evaluate(scores, ctx, future, k=10):
@@ -171,10 +269,12 @@ def evaluate(scores, ctx, future, k=10):
     return summary, per_user
 
 def candidates():
-    """Two course-related baselines plus one project temporal method."""
-    specs = [dict(name=f'UserCF {m} k={k}',kind='cf',metric=m,neighbors=k)
-             for m in ['cosine','jaccard'] for k in [20,40]]
+    """Two trivial baselines, two course baselines, the temporal method and the learned ranker."""
+    specs = [dict(name='Popularity',kind='popular'), dict(name='Personal counts',kind='personal')]
+    specs += [dict(name=f'UserCF {m} k={k}',kind='cf',metric=m,neighbors=k)
+              for m in ['cosine','jaccard'] for k in [20,40]]
     specs += [dict(name=f'Recency h={h}d',kind='recent',half_life=h) for h in [7,28,90]]
+    specs += [dict(name=f'LogReg ranker C={C}',kind='logistic',C=C) for C in [0.01,0.1,1.0]]
     return specs
 
 def compare(ctx,future,specs):
@@ -198,6 +298,21 @@ def paired_bootstrap(a,b,metric='ndcg', repetitions=2000):
     rng = np.random.default_rng(SEED)
     boot = rng.choice(d,size=(repetitions,len(d)),replace=True).mean(axis=1)
     return dict(mean_difference=float(d.mean()), ci_low=float(np.quantile(boot,.025)),ci_high=float(np.quantile(boot,.975)),users=len(d))
+
+def summary_table(metrics, details, reference, metric='ndcg', repetitions=2000):
+    """One row per model: its score with a user-bootstrap interval, other metrics, and the paired
+    difference from `reference`. Per-model intervals overlap far more than paired ones because
+    they include between-user difficulty, which pairing cancels."""
+    rng = np.random.default_rng(SEED)
+    rows = []
+    for name in metrics.sort_values(metric).index:
+        x = details[name][metric].to_numpy()
+        boot = rng.choice(x, size=(repetitions, len(x)), replace=True).mean(axis=1)
+        diff = paired_bootstrap(details[name], details[reference], metric, repetitions)
+        rows.append({'model': name, metric: x.mean(), f'{metric}_ci_low': np.quantile(boot, .025), f'{metric}_ci_high': np.quantile(boot, .975),
+                     **metrics.loc[name, ['precision','recall','repeat_recall','novel_recall','tail_recall']].to_dict(),
+                     f'diff_vs_{reference}': diff['mean_difference'], 'diff_ci_low': diff['ci_low'], 'diff_ci_high': diff['ci_high']})
+    return pd.DataFrame(rows).set_index('model')
 
 
 def load_artist_names():
@@ -227,3 +342,13 @@ def feature_representation_study(ctx, future, validation):
         rows.append(dict(experiment='Personal-history age weighting',
                          representation=f'exponential half-life={half_life} days', **existing))
     return pd.DataFrame(rows)
+
+
+def duration_study(ctx, future, half_lives=(7, 28, 90)):
+    """Validation-only: play counts vs inter-play listening-time proxies inside Recency."""
+    specs = [dict(name=f'Recency h={h}d {w}', kind='recent', half_life=h, play_weight=w)
+             for h in half_lives for w in ['count', 'gap', 'relative', 'no_skip']]
+    table, details = compare(ctx, future, specs)
+    table.insert(0, 'play_weight', [s['play_weight'] for s in specs])
+    table.insert(0, 'half_life', [s['half_life'] for s in specs])
+    return table, details

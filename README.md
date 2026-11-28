@@ -19,13 +19,18 @@ The supplied `recommendation.pdf` explicitly covers user/item similarities (p.28
 
 Our comparison method is **time-decayed personal preference (Recency)**. Each historical play contributes `2 ** (-age_days / half_life)` to its artist's score. Validation selects a **28-day half-life**. The supplied `temporal.pdf`, pp.12–13, explicitly teaches exponential age weighting. Our day-based implementation applies that course idea to artist plays; it is not a new algorithm or a modification inside UserCF.
 
+We also report two **trivial baselines** with no parameters — global **Popularity** and **Personal counts** (each user's most-played artists, no time decay) — and a **logistic-regression ranker** that scores (user, artist) candidate pairs from 21 history features (play counts, distinct listening days, multi-scale decay, days since last play, CF score, artist popularity). The ranker is trained on the 28 days before each cutoff, so it never sees the evaluation window; C is chosen on validation. These three were added after the original test comparison had been inspected, designed on validation only and evaluated on test once.
+
 | Method | Test NDCG@10 | Test Recall@10 | Test Precision@10 |
 |---|---:|---:|---:|
+| Popularity — trivial baseline | 0.1677 | 0.0218 | 0.1521 |
 | Jaccard UserCF — main baseline | 0.2852 | 0.0354 | 0.2701 |
 | Cosine UserCF — second baseline | 0.2883 | 0.0355 | 0.2726 |
-| Recency — project method | **0.5445** | **0.0950** | **0.5210** |
+| Personal counts — trivial baseline | 0.4887 | 0.0755 | 0.4622 |
+| Recency — project method | 0.5445 | 0.0950 | 0.5210 |
+| LogReg ranker C=0.01 | **0.5705** | **0.0996** | **0.5419** |
 
-Recency performs better in this experiment. This does not isolate the effect of time weighting, because Recency uses personal history while UserCF uses neighbor preferences. It also does not establish better new-artist discovery.
+The ranker beats Recency by +0.026 NDCG@10 on test (paired bootstrap 95% interval [0.017, 0.035]; +0.020 on validation), at the cost of lower tail recall (0.055 vs 0.079). Its largest coefficient is the number of distinct days an artist was played; raw play count is negative once days are held fixed. Recency performs better than both UserCF baselines. This does not isolate the effect of time weighting, because Recency uses personal history while UserCF uses neighbor preferences. It also does not establish better new-artist discovery.
 
 ## Additions following the detailed assignment slides (local revision)
 
